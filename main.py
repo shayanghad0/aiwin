@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-NaraRouter computer-control agent — Notepad GUI edition (robust).
+NaraRouter computer-control agent — with vision helper.
 
 Fixes vs. previous version:
-  * SAFE dispatcher: validates tool args against the JSON schema and catches
-    every exception, returning the error to the model as a tool result so the
-    agent loop self-corrects instead of crashing.
-  * Handles malformed / empty tool calls (agnes-2.5-flash sometimes sends
-    `paste_text({})` with no `text`).
-  * Retries a tool call once with a repair prompt before giving up.
+  * New tool `look_at_screen`: screenshots and sends them to a vision model,
+    so the text-only planner can actually see the UI.
+  * New tool `open_url`: supports app deep-links like spotify:collection.
+  * Screenshot path auto-repair: falls back to temp dir if parent missing.
+  * open_app no longer leaks "The system cannot find the file ..." to stdout.
+  * System prompt: use hotkey([...]) for chords, never press_key twice.
+  * MAX_STEPS default bumped to 20.
 """
 
 from __future__ import annotations
-import json, os, re, subprocess, sys, time
+import base64, json, os, re, subprocess, sys, tempfile, time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -21,11 +22,12 @@ from openai import OpenAI
 
 # ---------- Config ----------
 load_dotenv()
-API_KEY   = os.getenv("NARA_API_KEY", "").strip()
-BASE_URL  = os.getenv("NARA_BASE_URL", "https://router.bynara.id/v1").strip()
-MODEL     = os.getenv("NARA_MODEL", "agnes-2.5-flash").strip()
-MAX_STEPS = int(os.getenv("NARA_MAX_STEPS", "15"))
-CONFIRM   = os.getenv("NARA_CONFIRM", "1") not in ("0", "false", "no")
+API_KEY       = os.getenv("NARA_API_KEY", "").strip()
+BASE_URL      = os.getenv("NARA_BASE_URL", "https://router.bynara.id/v1").strip()
+MODEL         = os.getenv("NARA_MODEL", "agnes-2.5-flash").strip()
+VISION_MODEL  = os.getenv("NARA_VISION_MODEL", "DeepSeek V4 Flash Vision Exp").strip()
+MAX_STEPS     = int(os.getenv("NARA_MAX_STEPS", "20"))
+CONFIRM       = os.getenv("NARA_CONFIRM", "1") not in ("0", "false", "no")
 
 if not API_KEY or not API_KEY.startswith("sk-nry-"):
     sys.exit("NARA_API_KEY missing/malformed (sk-nry-...).")
@@ -49,7 +51,7 @@ except Exception as e:
     CLIP_IMPORT_ERROR = str(e)
 
 
-# ---------- Actions ----------
+# ---------- Helpers ----------
 def _confirm(msg: str) -> bool:
     if not CONFIRM:
         return True
@@ -59,20 +61,56 @@ def _confirm(msg: str) -> bool:
         return False
 
 
+def _safe_screenshot_path(path: str | None) -> str:
+    """Return a writable path. Fall back to OS temp dir if the given dir is missing."""
+    if not path:
+        return os.path.join(tempfile.gettempdir(), "nara_screen.png")
+    p = Path(os.path.expanduser(path))
+    if not p.parent.exists():
+        p = Path(tempfile.gettempdir()) / p.name
+    return str(p)
+
+
+def _devnull():
+    return subprocess.DEVNULL
+
+
+# ---------- Actions ----------
 def act_open_app(name: str) -> str:
     if not name:
         return "error: empty app name"
     try:
         if os.name == "nt":
-            subprocess.Popen(f'start "" "{name}"', shell=True)
+            subprocess.Popen(
+                f'start "" "{name}"', shell=True,
+                stdout=_devnull(), stderr=_devnull(),
+            )
         elif sys.platform == "darwin":
-            subprocess.Popen(["open", "-a", name])
+            subprocess.Popen(["open", "-a", name],
+                             stdout=_devnull(), stderr=_devnull())
         else:
-            subprocess.Popen([name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.Popen([name], stdout=_devnull(), stderr=_devnull())
         time.sleep(1.5)
         return f"launched {name}"
     except Exception as e:
         return f"error launching {name}: {e}"
+
+
+def act_open_url(url: str) -> str:
+    """Open an http(s) URL, file path, or app URI scheme like spotify:collection."""
+    if not url:
+        return "error: open_url called with empty url"
+    try:
+        if os.name == "nt":
+            os.startfile(url)  # handles http, file, and registered URI schemes
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", url], stdout=_devnull(), stderr=_devnull())
+        else:
+            subprocess.Popen(["xdg-open", url], stdout=_devnull(), stderr=_devnull())
+        time.sleep(1.5)
+        return f"opened {url}"
+    except Exception as e:
+        return f"error opening {url}: {e}"
 
 
 def act_focus_window(title_substr: str) -> str:
@@ -178,14 +216,59 @@ def act_wait(seconds: float) -> str:
         return f"error wait: {e}"
 
 
-def act_screenshot(path: str = "screenshot.png") -> str:
+def act_screenshot(path: str = "") -> str:
     if not HAS_GUI:
         return f"error: GUI unavailable ({GUI_IMPORT_ERROR})"
     try:
-        pyautogui.screenshot(path)
-        return f"saved {path}"
+        target = _safe_screenshot_path(path)
+        pyautogui.screenshot(target)
+        return f"saved {target}"
     except Exception as e:
         return f"error screenshot: {e}"
+
+
+def act_look_at_screen(question: str = "") -> str:
+    """Take a screenshot and ask a vision model to describe it."""
+    if not HAS_GUI:
+        return f"error: GUI unavailable ({GUI_IMPORT_ERROR})"
+    tmp = os.path.join(tempfile.gettempdir(), "nara_look.png")
+    try:
+        pyautogui.screenshot(tmp)
+    except Exception as e:
+        return f"error taking screenshot: {e}"
+
+    try:
+        with open(tmp, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("ascii")
+    except Exception as e:
+        return f"error reading screenshot: {e}"
+
+    q = question or (
+        "You are looking at a screenshot of a Windows desktop. "
+        "Describe: (a) which window(s) are visible, (b) the main UI elements "
+        "and their approximate pixel coordinates (assume a 1920x1080 screen "
+        "unless the image tells you otherwise), (c) anything that looks like a "
+        "Play button, navigation list, search box, or error dialog. "
+        "Be concise — under 200 words."
+    )
+
+    try:
+        r = client.chat.completions.create(
+            model=VISION_MODEL,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": q},
+                    {"type": "image_url",
+                     "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                ],
+            }],
+            max_tokens=600,
+            temperature=0.1,
+        )
+        return (r.choices[0].message.content or "(empty vision response)").strip()
+    except Exception as e:
+        return f"error calling vision model {VISION_MODEL!r}: {e}"
 
 
 def act_read_file(path: str) -> str:
@@ -215,13 +298,11 @@ def act_notepad_save_as(path: str) -> str:
     try:
         pyautogui.hotkey("ctrl", "s")
         time.sleep(0.9)
-        # The Windows Save-As filename field has focus by default.
-        # Type the full path; Notepad accepts an absolute path here.
         pyautogui.write(path, interval=0.01)
         time.sleep(0.25)
         pyautogui.press("enter")
         time.sleep(0.6)
-        pyautogui.press("enter")  # dismiss "file exists" if it appeared
+        pyautogui.press("enter")
         time.sleep(0.3)
         return f"Notepad save-as -> {path}"
     except Exception as e:
@@ -245,47 +326,61 @@ def act_run_shell(command: str) -> str:
 TOOLS: list[dict[str, Any]] = [
     {"type": "function", "function": {
         "name": "open_app",
-        "description": "Launch an application by name (e.g. 'notepad', 'FL64.exe').",
+        "description": "Launch an application by name (e.g. 'notepad', 'FL64.exe', 'spotify').",
         "parameters": {"type": "object",
             "properties": {"name": {"type": "string"}},
             "required": ["name"]}}},
     {"type": "function", "function": {
+        "name": "open_url",
+        "description": ("Open a URL or app deep-link. Supports http(s)://, file://, "
+                        "and registered URI schemes like 'spotify:collection' "
+                        "(Spotify Liked Songs), 'spotify:search:...', etc. "
+                        "Prefer this over GUI navigation when a deep link exists."),
+        "parameters": {"type": "object",
+            "properties": {"url": {"type": "string"}},
+            "required": ["url"]}}},
+    {"type": "function", "function": {
         "name": "focus_window",
-        "description": "Bring a window whose title contains this substring to the front (e.g. 'Notepad').",
+        "description": "Bring a window whose title contains this substring to the front.",
         "parameters": {"type": "object",
             "properties": {"title_substr": {"type": "string"}},
             "required": ["title_substr"]}}},
     {"type": "function", "function": {
-        "name": "paste_text",
-        "description": ("Paste text into the focused control via the clipboard. "
-                        "ALWAYS provide the full 'text' string. Use this for content "
-                        "longer than ~50 chars (stories, code, paragraphs)."),
+        "name": "look_at_screen",
+        "description": ("Take a screenshot and get a TEXT description from a vision model. "
+                        "USE THIS BEFORE ANY coordinate-based click if you are unsure what "
+                        "is on screen. Never guess pixel coordinates blindly."),
         "parameters": {"type": "object",
-            "properties": {
-                "text": {"type": "string",
-                         "description": "The exact content to paste."}},
+            "properties": {"question": {"type": "string",
+                "description": "Optional. What to look for on screen."}}}}},
+    {"type": "function", "function": {
+        "name": "paste_text",
+        "description": "Paste text via clipboard. ALWAYS include non-empty 'text'.",
+        "parameters": {"type": "object",
+            "properties": {"text": {"type": "string"}},
             "required": ["text"]}}},
     {"type": "function", "function": {
         "name": "type_text",
-        "description": "Type short ASCII text at the current focus (file paths, filenames).",
+        "description": "Type short ASCII text at current focus (paths, filenames).",
         "parameters": {"type": "object",
             "properties": {"text": {"type": "string"}},
             "required": ["text"]}}},
     {"type": "function", "function": {
         "name": "press_key",
-        "description": "Press a single key (enter, tab, esc, f7, ...).",
+        "description": "Press ONE key (enter, tab, esc, f7). For combos use hotkey.",
         "parameters": {"type": "object",
             "properties": {"key": {"type": "string"}},
             "required": ["key"]}}},
     {"type": "function", "function": {
         "name": "hotkey",
-        "description": "Press a key combination, e.g. ['ctrl','s'].",
+        "description": ("Press a chord, e.g. ['ctrl','s'], ['ctrl','shift','n']. "
+                        "Use this — do NOT press_key('ctrl') then press_key('x')."),
         "parameters": {"type": "object",
             "properties": {"keys": {"type": "array", "items": {"type": "string"}}},
             "required": ["keys"]}}},
     {"type": "function", "function": {
         "name": "click",
-        "description": "Click at absolute screen coordinates.",
+        "description": "Click at absolute screen coordinates. Use look_at_screen first.",
         "parameters": {"type": "object",
             "properties": {
                 "x": {"type": "integer"},
@@ -307,13 +402,11 @@ TOOLS: list[dict[str, Any]] = [
             "required": ["seconds"]}}},
     {"type": "function", "function": {
         "name": "get_screen_size",
-        "description": "Return the primary screen size as 'WxH'.",
+        "description": "Return primary screen size as 'WxH'.",
         "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {
         "name": "notepad_save_as",
-        "description": ("Use Notepad's own Save-As dialog to save the current document. "
-                        "Call ONLY after content is already in the editor. "
-                        "Provide the FULL absolute path including filename."),
+        "description": "Notepad's own Save-As dialog (Ctrl+S → path → Enter).",
         "parameters": {"type": "object",
             "properties": {"path": {"type": "string"}},
             "required": ["path"]}}},
@@ -325,7 +418,7 @@ TOOLS: list[dict[str, Any]] = [
             "required": ["path"]}}},
     {"type": "function", "function": {
         "name": "screenshot",
-        "description": "Save a screenshot to a file path.",
+        "description": "Save a screenshot to a file (use look_at_screen if you want to see it).",
         "parameters": {"type": "object",
             "properties": {"path": {"type": "string"}}}}},
     {"type": "function", "function": {
@@ -344,7 +437,9 @@ TOOLS: list[dict[str, Any]] = [
 
 DISPATCH: dict[str, Callable[..., str]] = {
     "open_app": act_open_app,
+    "open_url": act_open_url,
     "focus_window": act_focus_window,
+    "look_at_screen": act_look_at_screen,
     "paste_text": act_paste_text,
     "type_text": act_type_text,
     "press_key": act_press_key,
@@ -357,30 +452,28 @@ DISPATCH: dict[str, Callable[..., str]] = {
     "read_file": act_read_file,
     "screenshot": act_screenshot,
     "run_shell": act_run_shell,
-    # NOTE: no save_file — this forces the Notepad GUI path.
 }
 
-# Map of tool name -> set of required args (used to pre-validate calls).
 REQUIRED: dict[str, set[str]] = {
     t["function"]["name"]: set(t["function"]["parameters"].get("required", []))
+    for t in TOOLS
+}
+ALLOWED: dict[str, set[str]] = {
+    t["function"]["name"]: set(t["function"]["parameters"].get("properties", {}).keys())
     for t in TOOLS
 }
 
 
 # ---------- Safe dispatcher ----------
 def safe_dispatch(name: str, args: dict[str, Any]) -> str:
-    """Run a tool call without ever raising. Returns a string result/error."""
     fn = DISPATCH.get(name)
     if fn is None:
         return f"error: unknown tool {name!r}. Available: {', '.join(DISPATCH)}"
-
     if not isinstance(args, dict):
         return f"error: {name} expects an object of arguments, got {type(args).__name__}"
 
-    # Drop unexpected keys so the action functions don't blow up on TypeError.
     required = REQUIRED.get(name, set())
-    allowed  = set(TOOLS[[t["function"]["name"] for t in TOOLS].index(name)]
-                   ["function"]["parameters"].get("properties", {}).keys())
+    allowed  = ALLOWED.get(name, set())
     extra = set(args) - allowed
     if extra:
         args = {k: v for k, v in args.items() if k in allowed}
@@ -402,31 +495,43 @@ def safe_dispatch(name: str, args: dict[str, Any]) -> str:
 
 
 # ---------- System prompt ----------
-SYSTEM_PROMPT = """You are a computer-control agent on the user's real machine.
-You control the mouse, keyboard, and can launch apps. You CANNOT write files
-directly — there is no file-writing tool. All file creation must go through
-the target application's own GUI (e.g. Notepad's Save-As dialog).
+SYSTEM_PROMPT = """You are a computer-control agent on the user's real Windows machine.
+You control mouse, keyboard, and can launch apps. You CANNOT write files directly —
+there is no file-writing tool. All file creation goes through the target app's GUI.
+
+KEYBOARD RULES
+- For chords use hotkey(["ctrl","s"]). NEVER press_key("ctrl") then press_key("x")
+  — two separate presses do not form a shortcut.
+- Use paste_text for content longer than ~50 chars; type_text only for short ASCII
+  strings like paths inside dialogs.
+
+SEEING THE SCREEN
+- You are text-only; you cannot see images directly.
+- Call `look_at_screen` whenever you need to know what's on screen, especially
+  BEFORE any coordinate-based click. Never guess pixel coordinates blindly.
+- After acting, if unsure the action worked, call look_at_screen again to verify.
+
+APP SHORTCUTS — prefer these over GUI navigation
+- Spotify Liked Songs  → open_url("spotify:collection")
+- Spotify search       → open_url("spotify:search:YOUR+QUERY")
+- Spotify specific track → open_url("spotify:track:SPOTIFY_TRACK_ID")
+- YouTube search       → open_url("https://www.youtube.com/results?search_query=...")
+- Any web search       → open_url("https://www.google.com/search?q=...")
 
 MANDATORY NOTEPAD WORKFLOW
-When the user says any variation of "open Notepad, write X, save to Y":
   1. open_app(name="notepad")
   2. wait(seconds=2)
   3. focus_window(title_substr="Notepad")
-  4. paste_text(text="<the FULL story content>")   # must include the whole text
+  4. paste_text(text="<FULL content>")     # never call paste_text with no args
   5. notepad_save_as(path="<full absolute path>")
   6. finish(summary="...")
 
-HARD RULES
-- paste_text ALWAYS takes a non-empty "text" field. Never call paste_text() with
-  no arguments. Compose the entire content in your head, then pass it as "text".
-- type_text is only for short strings like file paths inside dialogs.
-- Always focus_window before pasting/typing.
-- Only call notepad_save_as AFTER the content is already in the editor.
+GENERAL RULES
 - Every tool call must include all fields marked required in the schema.
-- If a tool returns an "error: ..." message, read it and correct your next call.
-  Do not repeat the exact same call that just failed.
-- Keep reasoning short. One tool call per step where possible.
-- When done, call finish with a one-line summary mentioning the real path.
+- If a tool returns "error: ...", read it and correct your next call.
+  Do not repeat the exact same failed call.
+- One tool call per step where possible. Keep reasoning short.
+- When done, call finish with a one-line summary mentioning the real outcome.
 """
 
 
@@ -439,7 +544,6 @@ def run_task(task: str) -> None:
 
     for step in range(1, MAX_STEPS + 1):
         print(f"\n[step {step}/{MAX_STEPS}] thinking…")
-
         try:
             resp = client.chat.completions.create(
                 model=MODEL,
@@ -479,11 +583,13 @@ def run_task(task: str) -> None:
                 return
 
             result = safe_dispatch(name, args if isinstance(args, dict) else {})
-            print(f"    ↳ {result}")
+            # Multi-line results (like look_at_screen) get indented nicely.
+            for line in str(result).splitlines() or [""]:
+                print(f"    ↳ {line}")
             messages.append({
                 "role": "tool",
                 "tool_call_id": call.id,
-                "content": result,
+                "content": str(result),
             })
 
     print(f"\n[stopped] hit MAX_STEPS={MAX_STEPS} without finish()")
@@ -491,12 +597,14 @@ def run_task(task: str) -> None:
 
 # ---------- CLI ----------
 def main() -> None:
-    print("NaraRouter computer-control agent (Notepad GUI edition, robust)")
-    print(f"  base_url : {BASE_URL}")
-    print(f"  model    : {MODEL}")
-    print(f"  gui      : {'available' if HAS_GUI else 'UNAVAILABLE — ' + GUI_IMPORT_ERROR}")
-    print(f"  clipboard: {'available' if HAS_CLIP else 'UNAVAILABLE — ' + CLIP_IMPORT_ERROR}")
-    print(f"  confirm  : {'on' if CONFIRM else 'off'}")
+    print("NaraRouter computer-control agent (vision helper edition)")
+    print(f"  base_url    : {BASE_URL}")
+    print(f"  model       : {MODEL}")
+    print(f"  vision model: {VISION_MODEL}")
+    print(f"  gui         : {'available' if HAS_GUI else 'UNAVAILABLE — ' + GUI_IMPORT_ERROR}")
+    print(f"  clipboard   : {'available' if HAS_CLIP else 'UNAVAILABLE — ' + CLIP_IMPORT_ERROR}")
+    print(f"  confirm     : {'on' if CONFIRM else 'off'}")
+    print(f"  max steps   : {MAX_STEPS}")
     print("  type 'exit' or Ctrl+C to quit.\n")
 
     while True:
