@@ -1,25 +1,14 @@
 #!/usr/bin/env python3
 """
-NaraRouter computer-control agent — free-model fallback edition.
+NaraRouter computer-control agent — free-model fallback + folder-safe save.
 
-Features:
-  * Comma-separated fallback chain for planner AND vision models.
-  * Tool calling with a safe dispatcher (never crashes on bad model args).
-  * `look_at_screen` tool: screenshot -> vision model -> text description.
-  * `open_url` tool: supports app deep links like spotify:collection.
-  * Screenshot path auto-repair (falls back to temp dir).
-  * Notepad GUI workflow enforced (no direct file-writing tool).
-  * Per-step and per-task cost log.
-
-Env vars:
-  NARA_API_KEY          (required)  sk-nry-...
-  NARA_BASE_URL         default https://router.bynara.id/v1
-  NARA_MODEL            comma-separated fallback chain
-  NARA_VISION_MODEL     comma-separated fallback chain
-  NARA_MAX_STEPS        default 20
-  NARA_CONFIRM          1 = ask before run_shell (default), 0 = never ask
-  NARA_PRICE_IN         optional, Rp per 1M input tokens (for cost log)
-  NARA_PRICE_OUT        optional, Rp per 1M output tokens (for cost log)
+Changes vs. previous version:
+  * New tool `create_folder` — makes a directory tree, no shell needed.
+  * `notepad_save_as` now:
+      - creates the parent directory automatically,
+      - verifies the file actually exists after the dialog closes,
+      - retries once, then returns an honest error if the file is still missing.
+  * System prompt forces `create_folder` before any save into a new path.
 """
 
 from __future__ import annotations
@@ -39,7 +28,7 @@ from openai import OpenAI
 # ---------- Config ----------
 load_dotenv()
 
-API_KEY       = os.getenv("NARA_API_KEY", "sk-nry-TXIqadSOkTCeiz7UhFifpdaycsJLTjqXREYr09N07NA").strip()
+API_KEY       = os.getenv("NARA_API_KEY", "").strip()
 BASE_URL      = os.getenv("NARA_BASE_URL", "https://router.bynara.id/v1").strip()
 MODELS        = [m.strip() for m in os.getenv(
     "NARA_MODEL", "nemotron-3-super-free,agnes-2.5-flash"
@@ -50,7 +39,6 @@ VISION_MODELS = [m.strip() for m in os.getenv(
 MAX_STEPS     = int(os.getenv("NARA_MAX_STEPS", "20"))
 CONFIRM       = os.getenv("NARA_CONFIRM", "1") not in ("0", "false", "no")
 
-# Optional cost logging (Rp per 1M tokens). Leave unset to skip.
 try:
     PRICE_IN  = float(os.getenv("NARA_PRICE_IN",  "0") or 0)
     PRICE_OUT = float(os.getenv("NARA_PRICE_OUT", "0") or 0)
@@ -81,7 +69,6 @@ except Exception as e:
 
 # ---------- Fallback chat helper ----------
 def _chat_with_fallback(models: list[str], **kwargs):
-    """Try each model in order. Returns (response, model_used). Raises if all fail."""
     last_err: Exception | None = None
     for m in models:
         try:
@@ -102,10 +89,8 @@ def _log_usage(resp, model: str) -> None:
     u = getattr(resp, "usage", None)
     if not u:
         return
-    pin = getattr(u, "prompt_tokens", 0) or 0
-    pout = getattr(u, "completion_tokens", 0) or 0
-    _TASK_USAGE["in"] += pin
-    _TASK_USAGE["out"] += pout
+    _TASK_USAGE["in"]  += getattr(u, "prompt_tokens", 0) or 0
+    _TASK_USAGE["out"] += getattr(u, "completion_tokens", 0) or 0
 
 
 def _print_task_cost() -> None:
@@ -173,6 +158,18 @@ def act_open_url(url: str) -> str:
         return f"opened {url}"
     except Exception as e:
         return f"error opening {url}: {e}"
+
+
+def act_create_folder(path: str) -> str:
+    """Create a directory tree (parents included). Idempotent."""
+    if not path:
+        return "error: create_folder called with empty path"
+    p = Path(os.path.expanduser(path))
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+        return f"folder ready: {p}"
+    except Exception as e:
+        return f"error creating folder {p}: {e}"
 
 
 def act_focus_window(title_substr: str) -> str:
@@ -353,22 +350,54 @@ def act_get_screen_size() -> str:
 
 
 def act_notepad_save_as(path: str) -> str:
+    """
+    Save the current Notepad document via Ctrl+S -> type path -> Enter.
+    * Auto-creates the parent folder.
+    * Verifies the file actually exists afterwards (retries once).
+    """
     if not path:
         return "error: notepad_save_as called with empty path"
     if not HAS_GUI:
         return f"error: GUI unavailable ({GUI_IMPORT_ERROR})"
+
+    target = Path(os.path.expanduser(path))
+    # 1. Make sure the folder exists BEFORE the dialog opens.
     try:
-        pyautogui.hotkey("ctrl", "s")
-        time.sleep(0.9)
-        pyautogui.write(path, interval=0.01)
-        time.sleep(0.25)
-        pyautogui.press("enter")
-        time.sleep(0.6)
-        pyautogui.press("enter")
-        time.sleep(0.3)
-        return f"Notepad save-as -> {path}"
+        target.parent.mkdir(parents=True, exist_ok=True)
     except Exception as e:
-        return f"error save-as: {e}"
+        return f"error: cannot create parent folder {target.parent}: {e}"
+
+    # 2. Drive the Save-As dialog. Retry once if the file doesn't appear.
+    for attempt in (1, 2):
+        try:
+            pyautogui.hotkey("ctrl", "s")
+            time.sleep(0.9)
+            pyautogui.write(str(target), interval=0.01)
+            time.sleep(0.25)
+            pyautogui.press("enter")
+            time.sleep(0.7)
+            # Dismiss possible overwrite / error dialog.
+            pyautogui.press("enter")
+            time.sleep(0.4)
+        except Exception as e:
+            return f"error save-as (attempt {attempt}): {e}"
+
+        if target.exists():
+            size = target.stat().st_size
+            return f"saved OK -> {target} ({size} bytes)"
+
+        # If a modal is stuck, try Esc before retrying.
+        try:
+            pyautogui.press("esc")
+            time.sleep(0.3)
+            pyautogui.hotkey("ctrl", "s")
+            time.sleep(0.6)
+        except Exception:
+            pass
+
+    return (f"error: file was NOT created at {target} after 2 attempts. "
+            f"The Save-As dialog may have rejected the path or lost focus. "
+            f"Verify the folder exists and retry.")
 
 
 def act_run_shell(command: str) -> str:
@@ -395,11 +424,17 @@ TOOLS: list[dict[str, Any]] = [
     {"type": "function", "function": {
         "name": "open_url",
         "description": ("Open a URL or app deep-link. Supports http(s)://, file://, "
-                        "and URI schemes like 'spotify:collection' (Spotify Liked Songs), "
-                        "'spotify:search:QUERY'. Prefer this over GUI navigation."),
+                        "and URI schemes like 'spotify:collection', 'spotify:search:QUERY'."),
         "parameters": {"type": "object",
             "properties": {"url": {"type": "string"}},
             "required": ["url"]}}},
+    {"type": "function", "function": {
+        "name": "create_folder",
+        "description": ("Create a folder (and any missing parents). Call this BEFORE "
+                        "saving a file into a path that may not exist yet."),
+        "parameters": {"type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"]}}},
     {"type": "function", "function": {
         "name": "focus_window",
         "description": "Bring a window whose title contains this substring to the front.",
@@ -408,12 +443,10 @@ TOOLS: list[dict[str, Any]] = [
             "required": ["title_substr"]}}},
     {"type": "function", "function": {
         "name": "look_at_screen",
-        "description": ("Take a screenshot and get a TEXT description from a vision model. "
-                        "USE THIS BEFORE ANY coordinate-based click if unsure what's on screen. "
-                        "Never guess pixel coordinates blindly."),
+        "description": ("Screenshot -> text description via a vision model. "
+                        "USE THIS BEFORE ANY coordinate-based click if unsure."),
         "parameters": {"type": "object",
-            "properties": {"question": {"type": "string",
-                "description": "Optional. What to look for on screen."}}}}},
+            "properties": {"question": {"type": "string"}}}}},
     {"type": "function", "function": {
         "name": "paste_text",
         "description": "Paste text via clipboard. ALWAYS include non-empty 'text'.",
@@ -428,14 +461,13 @@ TOOLS: list[dict[str, Any]] = [
             "required": ["text"]}}},
     {"type": "function", "function": {
         "name": "press_key",
-        "description": "Press ONE key (enter, tab, esc, f7). For combos use hotkey.",
+        "description": "Press ONE key. For combos use hotkey.",
         "parameters": {"type": "object",
             "properties": {"key": {"type": "string"}},
             "required": ["key"]}}},
     {"type": "function", "function": {
         "name": "hotkey",
-        "description": ("Press a chord, e.g. ['ctrl','s']. Use this — do NOT "
-                        "press_key('ctrl') then press_key('x')."),
+        "description": "Press a chord, e.g. ['ctrl','s'].",
         "parameters": {"type": "object",
             "properties": {"keys": {"type": "array", "items": {"type": "string"}}},
             "required": ["keys"]}}},
@@ -457,7 +489,7 @@ TOOLS: list[dict[str, Any]] = [
             "required": ["x", "y"]}}},
     {"type": "function", "function": {
         "name": "wait",
-        "description": "Pause N seconds (let an app finish loading).",
+        "description": "Pause N seconds.",
         "parameters": {"type": "object",
             "properties": {"seconds": {"type": "number"}},
             "required": ["seconds"]}}},
@@ -467,7 +499,9 @@ TOOLS: list[dict[str, Any]] = [
         "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {
         "name": "notepad_save_as",
-        "description": "Notepad's own Save-As dialog (Ctrl+S → path → Enter).",
+        "description": ("Save the current Notepad document to a full path via the real "
+                        "Save-As dialog. Auto-creates the parent folder. Returns an "
+                        "error if the file could not be written."),
         "parameters": {"type": "object",
             "properties": {"path": {"type": "string"}},
             "required": ["path"]}}},
@@ -479,7 +513,7 @@ TOOLS: list[dict[str, Any]] = [
             "required": ["path"]}}},
     {"type": "function", "function": {
         "name": "screenshot",
-        "description": "Save a screenshot to a file (use look_at_screen if you want to see it).",
+        "description": "Save a screenshot to a file.",
         "parameters": {"type": "object",
             "properties": {"path": {"type": "string"}}}}},
     {"type": "function", "function": {
@@ -499,6 +533,7 @@ TOOLS: list[dict[str, Any]] = [
 DISPATCH: dict[str, Callable[..., str]] = {
     "open_app": act_open_app,
     "open_url": act_open_url,
+    "create_folder": act_create_folder,
     "focus_window": act_focus_window,
     "look_at_screen": act_look_at_screen,
     "paste_text": act_paste_text,
@@ -513,7 +548,6 @@ DISPATCH: dict[str, Callable[..., str]] = {
     "read_file": act_read_file,
     "screenshot": act_screenshot,
     "run_shell": act_run_shell,
-    # NOTE: no save_file — forces the GUI path.
 }
 
 REQUIRED: dict[str, set[str]] = {
@@ -559,41 +593,51 @@ def safe_dispatch(name: str, args: dict[str, Any]) -> str:
 # ---------- System prompt ----------
 SYSTEM_PROMPT = """You are a computer-control agent on the user's real Windows machine.
 You control mouse, keyboard, and can launch apps. You CANNOT write files directly —
-there is no file-writing tool. All file creation goes through the target app's GUI.
+all file creation goes through the target app's GUI.
 
 KEYBOARD RULES
-- For chords use hotkey(["ctrl","s"]). NEVER press_key("ctrl") then press_key("x")
-  — two separate presses do not form a shortcut.
-- Use paste_text for content longer than ~50 chars; type_text only for short ASCII
-  strings like paths inside dialogs.
+- For chords use hotkey(["ctrl","s"]). NEVER press_key("ctrl") then press_key("x").
+- paste_text for content > ~50 chars; type_text only for short ASCII strings.
 
 SEEING THE SCREEN
 - You are text-only; you cannot see images directly.
-- Call `look_at_screen` whenever you need to know what's on screen, especially
+- Call `look_at_screen` whenever you need to know what's on screen — especially
   BEFORE any coordinate-based click. Never guess pixel coordinates blindly.
-- After acting, if unsure the action worked, call look_at_screen again to verify.
 
-APP SHORTCUTS — prefer these over GUI navigation
+PATHS AND FOLDERS — READ CAREFULLY
+- Before saving into any path, check whether its parent folder exists.
+- If a folder might not exist, call `create_folder` FIRST with the folder path.
+- `notepad_save_as` auto-creates the parent folder, but explicit `create_folder`
+  is clearer and lets you verify success before touching the save dialog.
+- After calling `notepad_save_as`, look at its result:
+    * "saved OK -> ..."      => success, you may call finish.
+    * "error: file was NOT created ..." => the save failed. Try again:
+        1. focus_window("Notepad")
+        2. re-run notepad_save_as with the same path
+        3. if it fails again, call look_at_screen to see what's blocking
+
+APP SHORTCUTS
 - Spotify Liked Songs  → open_url("spotify:collection")
 - Spotify search       → open_url("spotify:search:YOUR+QUERY")
-- Spotify track        → open_url("spotify:track:SPOTIFY_TRACK_ID")
 - YouTube search       → open_url("https://www.youtube.com/results?search_query=...")
-- Any web search       → open_url("https://www.google.com/search?q=...")
+- Web search           → open_url("https://www.google.com/search?q=...")
 
 MANDATORY NOTEPAD WORKFLOW
   1. open_app(name="notepad")
   2. wait(seconds=2)
   3. focus_window(title_substr="Notepad")
-  4. paste_text(text="<FULL content>")     # never call paste_text with no args
-  5. notepad_save_as(path="<full absolute path>")
-  6. finish(summary="...")
+  4. paste_text(text="<FULL content>")     # never empty
+  5. create_folder(path="<parent folder>") # only if it might not exist
+  6. notepad_save_as(path="<full absolute path>")
+  7. If the save returned an error, retry as described above.
+  8. finish(summary="...")                 # only after saved OK
 
 GENERAL RULES
-- Every tool call must include all fields marked required in the schema.
+- Every tool call must include all fields marked required.
 - If a tool returns "error: ...", read it and correct your next call.
   Do not repeat the exact same failed call.
-- One tool call per step where possible. Keep reasoning short.
-- When done, call finish with a one-line summary mentioning the real outcome.
+- One tool call per step where possible.
+- Never claim success unless the last tool result confirms it.
 """
 
 
@@ -628,8 +672,21 @@ def run_task(task: str) -> None:
 
         msg = resp.choices[0].message
 
+        # Empty response with no tool calls -> nudge the model once.
+        content = (msg.content or "").strip()
+        if not getattr(msg, "tool_calls", None) and not content:
+            print("  ! empty model response; nudging once…")
+            messages.append({"role": "assistant", "content": ""})
+            messages.append({
+                "role": "user",
+                "content": ("You returned nothing. If the task is not yet finished, "
+                            "call the next tool now. If it IS finished, call "
+                            "finish(summary=\"...\")."),
+            })
+            continue
+
         if not getattr(msg, "tool_calls", None):
-            print(f"\n[model said] {msg.content}")
+            print(f"\n[model said] {content}")
             _print_task_cost()
             return
 
@@ -669,7 +726,7 @@ def run_task(task: str) -> None:
 
 # ---------- CLI ----------
 def main() -> None:
-    print("NaraRouter computer-control agent (free-model fallback edition)")
+    print("NaraRouter computer-control agent (folder-safe save edition)")
     print(f"  base_url    : {BASE_URL}")
     print(f"  planner     : {' → '.join(MODELS)}")
     print(f"  vision      : {' → '.join(VISION_MODELS)}")
@@ -679,8 +736,6 @@ def main() -> None:
     print(f"  max steps   : {MAX_STEPS}")
     if PRICE_IN or PRICE_OUT:
         print(f"  price       : Rp{PRICE_IN}/1M in, Rp{PRICE_OUT}/1M out")
-    else:
-        print(f"  price       : (set NARA_PRICE_IN / NARA_PRICE_OUT to log cost)")
     print("  type 'exit' or Ctrl+C to quit.\n")
 
     while True:
