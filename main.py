@@ -1,19 +1,35 @@
 #!/usr/bin/env python3
 """
-NaraRouter computer-control agent — with vision helper.
+NaraRouter computer-control agent — free-model fallback edition.
 
-Fixes vs. previous version:
-  * New tool `look_at_screen`: screenshots and sends them to a vision model,
-    so the text-only planner can actually see the UI.
-  * New tool `open_url`: supports app deep-links like spotify:collection.
-  * Screenshot path auto-repair: falls back to temp dir if parent missing.
-  * open_app no longer leaks "The system cannot find the file ..." to stdout.
-  * System prompt: use hotkey([...]) for chords, never press_key twice.
-  * MAX_STEPS default bumped to 20.
+Features:
+  * Comma-separated fallback chain for planner AND vision models.
+  * Tool calling with a safe dispatcher (never crashes on bad model args).
+  * `look_at_screen` tool: screenshot -> vision model -> text description.
+  * `open_url` tool: supports app deep links like spotify:collection.
+  * Screenshot path auto-repair (falls back to temp dir).
+  * Notepad GUI workflow enforced (no direct file-writing tool).
+  * Per-step and per-task cost log.
+
+Env vars:
+  NARA_API_KEY          (required)  sk-nry-...
+  NARA_BASE_URL         default https://router.bynara.id/v1
+  NARA_MODEL            comma-separated fallback chain
+  NARA_VISION_MODEL     comma-separated fallback chain
+  NARA_MAX_STEPS        default 20
+  NARA_CONFIRM          1 = ask before run_shell (default), 0 = never ask
+  NARA_PRICE_IN         optional, Rp per 1M input tokens (for cost log)
+  NARA_PRICE_OUT        optional, Rp per 1M output tokens (for cost log)
 """
 
 from __future__ import annotations
-import base64, json, os, re, subprocess, sys, tempfile, time
+import base64
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -22,12 +38,24 @@ from openai import OpenAI
 
 # ---------- Config ----------
 load_dotenv()
-API_KEY       = os.getenv("NARA_API_KEY", "").strip()
+
+API_KEY       = os.getenv("NARA_API_KEY", "sk-nry-TXIqadSOkTCeiz7UhFifpdaycsJLTjqXREYr09N07NA").strip()
 BASE_URL      = os.getenv("NARA_BASE_URL", "https://router.bynara.id/v1").strip()
-MODEL         = os.getenv("NARA_MODEL", "agnes-2.5-flash").strip()
-VISION_MODEL  = os.getenv("NARA_VISION_MODEL", "DeepSeek V4 Flash Vision Exp").strip()
+MODELS        = [m.strip() for m in os.getenv(
+    "NARA_MODEL", "nemotron-3-super-free,agnes-2.5-flash"
+).split(",") if m.strip()]
+VISION_MODELS = [m.strip() for m in os.getenv(
+    "NARA_VISION_MODEL", "nex-n2.5-pro,agnes-2.5-flash"
+).split(",") if m.strip()]
 MAX_STEPS     = int(os.getenv("NARA_MAX_STEPS", "20"))
 CONFIRM       = os.getenv("NARA_CONFIRM", "1") not in ("0", "false", "no")
+
+# Optional cost logging (Rp per 1M tokens). Leave unset to skip.
+try:
+    PRICE_IN  = float(os.getenv("NARA_PRICE_IN",  "0") or 0)
+    PRICE_OUT = float(os.getenv("NARA_PRICE_OUT", "0") or 0)
+except ValueError:
+    PRICE_IN = PRICE_OUT = 0.0
 
 if not API_KEY or not API_KEY.startswith("sk-nry-"):
     sys.exit("NARA_API_KEY missing/malformed (sk-nry-...).")
@@ -51,6 +79,44 @@ except Exception as e:
     CLIP_IMPORT_ERROR = str(e)
 
 
+# ---------- Fallback chat helper ----------
+def _chat_with_fallback(models: list[str], **kwargs):
+    """Try each model in order. Returns (response, model_used). Raises if all fail."""
+    last_err: Exception | None = None
+    for m in models:
+        try:
+            resp = client.chat.completions.create(model=m, **kwargs)
+            return resp, m
+        except Exception as e:
+            last_err = e
+            print(f"    ! model {m!r} failed: {e}")
+    assert last_err is not None
+    raise last_err
+
+
+# ---------- Cost log ----------
+_TASK_USAGE = {"in": 0, "out": 0}
+
+
+def _log_usage(resp, model: str) -> None:
+    u = getattr(resp, "usage", None)
+    if not u:
+        return
+    pin = getattr(u, "prompt_tokens", 0) or 0
+    pout = getattr(u, "completion_tokens", 0) or 0
+    _TASK_USAGE["in"] += pin
+    _TASK_USAGE["out"] += pout
+
+
+def _print_task_cost() -> None:
+    pin, pout = _TASK_USAGE["in"], _TASK_USAGE["out"]
+    line = f"[cost] tokens in={pin} out={pout}"
+    if PRICE_IN or PRICE_OUT:
+        rp = pin / 1_000_000 * PRICE_IN + pout / 1_000_000 * PRICE_OUT
+        line += f"  ≈ Rp{rp:,.2f}"
+    print(line)
+
+
 # ---------- Helpers ----------
 def _confirm(msg: str) -> bool:
     if not CONFIRM:
@@ -62,7 +128,6 @@ def _confirm(msg: str) -> bool:
 
 
 def _safe_screenshot_path(path: str | None) -> str:
-    """Return a writable path. Fall back to OS temp dir if the given dir is missing."""
     if not path:
         return os.path.join(tempfile.gettempdir(), "nara_screen.png")
     p = Path(os.path.expanduser(path))
@@ -81,10 +146,8 @@ def act_open_app(name: str) -> str:
         return "error: empty app name"
     try:
         if os.name == "nt":
-            subprocess.Popen(
-                f'start "" "{name}"', shell=True,
-                stdout=_devnull(), stderr=_devnull(),
-            )
+            subprocess.Popen(f'start "" "{name}"', shell=True,
+                             stdout=_devnull(), stderr=_devnull())
         elif sys.platform == "darwin":
             subprocess.Popen(["open", "-a", name],
                              stdout=_devnull(), stderr=_devnull())
@@ -97,12 +160,11 @@ def act_open_app(name: str) -> str:
 
 
 def act_open_url(url: str) -> str:
-    """Open an http(s) URL, file path, or app URI scheme like spotify:collection."""
     if not url:
         return "error: open_url called with empty url"
     try:
         if os.name == "nt":
-            os.startfile(url)  # handles http, file, and registered URI schemes
+            os.startfile(url)
         elif sys.platform == "darwin":
             subprocess.Popen(["open", url], stdout=_devnull(), stderr=_devnull())
         else:
@@ -228,7 +290,6 @@ def act_screenshot(path: str = "") -> str:
 
 
 def act_look_at_screen(question: str = "") -> str:
-    """Take a screenshot and ask a vision model to describe it."""
     if not HAS_GUI:
         return f"error: GUI unavailable ({GUI_IMPORT_ERROR})"
     tmp = os.path.join(tempfile.gettempdir(), "nara_look.png")
@@ -236,7 +297,6 @@ def act_look_at_screen(question: str = "") -> str:
         pyautogui.screenshot(tmp)
     except Exception as e:
         return f"error taking screenshot: {e}"
-
     try:
         with open(tmp, "rb") as f:
             b64 = base64.b64encode(f.read()).decode("ascii")
@@ -244,17 +304,15 @@ def act_look_at_screen(question: str = "") -> str:
         return f"error reading screenshot: {e}"
 
     q = question or (
-        "You are looking at a screenshot of a Windows desktop. "
-        "Describe: (a) which window(s) are visible, (b) the main UI elements "
-        "and their approximate pixel coordinates (assume a 1920x1080 screen "
-        "unless the image tells you otherwise), (c) anything that looks like a "
-        "Play button, navigation list, search box, or error dialog. "
-        "Be concise — under 200 words."
+        "You are looking at a Windows desktop screenshot. Describe: "
+        "(a) which windows are visible, (b) the main UI elements with "
+        "approximate pixel coordinates (assume 1920x1080 unless obvious "
+        "otherwise), (c) anything that looks like a Play button, navigation "
+        "list, search box, or error dialog. Be concise — under 200 words."
     )
-
     try:
-        r = client.chat.completions.create(
-            model=VISION_MODEL,
+        r, used = _chat_with_fallback(
+            VISION_MODELS,
             messages=[{
                 "role": "user",
                 "content": [
@@ -266,9 +324,13 @@ def act_look_at_screen(question: str = "") -> str:
             max_tokens=600,
             temperature=0.1,
         )
-        return (r.choices[0].message.content or "(empty vision response)").strip()
+        _log_usage(r, used)
+        text = (r.choices[0].message.content or "(empty vision response)").strip()
+        if used != VISION_MODELS[0]:
+            text = f"[served by {used}] " + text
+        return text
     except Exception as e:
-        return f"error calling vision model {VISION_MODEL!r}: {e}"
+        return f"error: all vision models failed ({e})"
 
 
 def act_read_file(path: str) -> str:
@@ -333,9 +395,8 @@ TOOLS: list[dict[str, Any]] = [
     {"type": "function", "function": {
         "name": "open_url",
         "description": ("Open a URL or app deep-link. Supports http(s)://, file://, "
-                        "and registered URI schemes like 'spotify:collection' "
-                        "(Spotify Liked Songs), 'spotify:search:...', etc. "
-                        "Prefer this over GUI navigation when a deep link exists."),
+                        "and URI schemes like 'spotify:collection' (Spotify Liked Songs), "
+                        "'spotify:search:QUERY'. Prefer this over GUI navigation."),
         "parameters": {"type": "object",
             "properties": {"url": {"type": "string"}},
             "required": ["url"]}}},
@@ -348,8 +409,8 @@ TOOLS: list[dict[str, Any]] = [
     {"type": "function", "function": {
         "name": "look_at_screen",
         "description": ("Take a screenshot and get a TEXT description from a vision model. "
-                        "USE THIS BEFORE ANY coordinate-based click if you are unsure what "
-                        "is on screen. Never guess pixel coordinates blindly."),
+                        "USE THIS BEFORE ANY coordinate-based click if unsure what's on screen. "
+                        "Never guess pixel coordinates blindly."),
         "parameters": {"type": "object",
             "properties": {"question": {"type": "string",
                 "description": "Optional. What to look for on screen."}}}}},
@@ -373,8 +434,8 @@ TOOLS: list[dict[str, Any]] = [
             "required": ["key"]}}},
     {"type": "function", "function": {
         "name": "hotkey",
-        "description": ("Press a chord, e.g. ['ctrl','s'], ['ctrl','shift','n']. "
-                        "Use this — do NOT press_key('ctrl') then press_key('x')."),
+        "description": ("Press a chord, e.g. ['ctrl','s']. Use this — do NOT "
+                        "press_key('ctrl') then press_key('x')."),
         "parameters": {"type": "object",
             "properties": {"keys": {"type": "array", "items": {"type": "string"}}},
             "required": ["keys"]}}},
@@ -452,6 +513,7 @@ DISPATCH: dict[str, Callable[..., str]] = {
     "read_file": act_read_file,
     "screenshot": act_screenshot,
     "run_shell": act_run_shell,
+    # NOTE: no save_file — forces the GUI path.
 }
 
 REQUIRED: dict[str, set[str]] = {
@@ -514,7 +576,7 @@ SEEING THE SCREEN
 APP SHORTCUTS — prefer these over GUI navigation
 - Spotify Liked Songs  → open_url("spotify:collection")
 - Spotify search       → open_url("spotify:search:YOUR+QUERY")
-- Spotify specific track → open_url("spotify:track:SPOTIFY_TRACK_ID")
+- Spotify track        → open_url("spotify:track:SPOTIFY_TRACK_ID")
 - YouTube search       → open_url("https://www.youtube.com/results?search_query=...")
 - Any web search       → open_url("https://www.google.com/search?q=...")
 
@@ -537,6 +599,9 @@ GENERAL RULES
 
 # ---------- Agent loop ----------
 def run_task(task: str) -> None:
+    _TASK_USAGE["in"] = 0
+    _TASK_USAGE["out"] = 0
+
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": task},
@@ -544,22 +609,28 @@ def run_task(task: str) -> None:
 
     for step in range(1, MAX_STEPS + 1):
         print(f"\n[step {step}/{MAX_STEPS}] thinking…")
+
         try:
-            resp = client.chat.completions.create(
-                model=MODEL,
+            resp, used_model = _chat_with_fallback(
+                MODELS,
                 messages=messages,
                 tools=TOOLS,
                 tool_choice="auto",
                 temperature=0.2,
             )
+            if used_model != MODELS[0]:
+                print(f"    (served by fallback model: {used_model})")
+            _log_usage(resp, used_model)
         except Exception as e:
-            print(f"[api error] {e}")
+            print(f"[api error] all planner models failed: {e}")
+            _print_task_cost()
             return
 
         msg = resp.choices[0].message
 
         if not getattr(msg, "tool_calls", None):
             print(f"\n[model said] {msg.content}")
+            _print_task_cost()
             return
 
         messages.append(msg.model_dump(exclude_none=True))
@@ -580,10 +651,10 @@ def run_task(task: str) -> None:
 
             if name == "finish":
                 print(f"\n[done] {args.get('summary', '')}")
+                _print_task_cost()
                 return
 
             result = safe_dispatch(name, args if isinstance(args, dict) else {})
-            # Multi-line results (like look_at_screen) get indented nicely.
             for line in str(result).splitlines() or [""]:
                 print(f"    ↳ {line}")
             messages.append({
@@ -593,18 +664,23 @@ def run_task(task: str) -> None:
             })
 
     print(f"\n[stopped] hit MAX_STEPS={MAX_STEPS} without finish()")
+    _print_task_cost()
 
 
 # ---------- CLI ----------
 def main() -> None:
-    print("NaraRouter computer-control agent (vision helper edition)")
+    print("NaraRouter computer-control agent (free-model fallback edition)")
     print(f"  base_url    : {BASE_URL}")
-    print(f"  model       : {MODEL}")
-    print(f"  vision model: {VISION_MODEL}")
+    print(f"  planner     : {' → '.join(MODELS)}")
+    print(f"  vision      : {' → '.join(VISION_MODELS)}")
     print(f"  gui         : {'available' if HAS_GUI else 'UNAVAILABLE — ' + GUI_IMPORT_ERROR}")
     print(f"  clipboard   : {'available' if HAS_CLIP else 'UNAVAILABLE — ' + CLIP_IMPORT_ERROR}")
     print(f"  confirm     : {'on' if CONFIRM else 'off'}")
     print(f"  max steps   : {MAX_STEPS}")
+    if PRICE_IN or PRICE_OUT:
+        print(f"  price       : Rp{PRICE_IN}/1M in, Rp{PRICE_OUT}/1M out")
+    else:
+        print(f"  price       : (set NARA_PRICE_IN / NARA_PRICE_OUT to log cost)")
     print("  type 'exit' or Ctrl+C to quit.\n")
 
     while True:
