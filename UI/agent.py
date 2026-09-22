@@ -15,9 +15,9 @@ from PyQt5.QtWidgets import (
 )
 
 from . import config
-from .chat import _chat_with_fallback
+from .chat import _chat_with_fallback, _print_typewriter
 from .apps import act_open_app, act_open_url, act_create_folder, act_focus_window
-from .input import act_paste_text, act_type_text, act_press_key, act_hotkey
+from .input import act_paste_text, act_type_text, act_stream_text, act_press_key, act_hotkey
 from .mouse import act_click, act_move_mouse, act_wait
 from .screen import act_screenshot, act_look_at_screen, act_get_screen_size
 from .files import act_read_file, act_notepad_save_as
@@ -64,9 +64,15 @@ TOOLS: list[dict[str, Any]] = [
             "required": ["text"]}}},
     {"type": "function", "function": {
         "name": "type_text",
-        "description": "Type short ASCII text at current focus.",
+        "description": "Type short ASCII text at current focus (paths, filenames). Fast (~10ms/char).",
         "parameters": {"type": "object",
             "properties": {"text": {"type": "string"}},
+            "required": ["text"]}}},
+    {"type": "function", "function": {
+        "name": "stream_text",
+        "description": "Stream-type text at human-like speed (~35ms/char) into whatever window is focused. Use for writing stories, emails, long content — NEVER use paste_text for long-form writing. Text appears char by char as if a real person is typing.",
+        "parameters": {"type": "object",
+            "properties": {"text": {"type": "string"}, "interval": {"type": "number", "default": 0.035}},
             "required": ["text"]}}},
     {"type": "function", "function": {
         "name": "press_key",
@@ -145,6 +151,7 @@ DISPATCH: dict[str, Callable[..., str]] = {
     "look_at_screen": act_look_at_screen,
     "paste_text": act_paste_text,
     "type_text": act_type_text,
+    "stream_text": act_stream_text,
     "press_key": act_press_key,
     "hotkey": act_hotkey,
     "click": act_click,
@@ -201,7 +208,8 @@ You control mouse, keyboard, and can launch apps. You CANNOT write files directl
 
 KEYBOARD RULES
 - For chords use hotkey(["ctrl","s"]). NEVER press_key("ctrl") then press_key("x").
-- paste_text for content > ~50 chars; type_text only for short ASCII strings.
+- paste_text for content > ~50 chars; type_text only for short ASCII strings (paths, filenames).
+- stream_text for long-form writing (stories, essays, emails) — types char by char into whatever window is focused. ALWAYS prefer stream_text over paste_text when writing any substantial text block.
 
 SEEING THE SCREEN
 - You are text-only; call `look_at_screen` before any coordinate-based click.
@@ -222,7 +230,8 @@ MANDATORY NOTEPAD WORKFLOW
   1. open_app(name="notepad")
   2. wait(seconds=2)
   3. focus_window(title_substr="Notepad")
-  4. paste_text(text="<FULL content>")
+  4. stream_text(text="<content paragraph by paragraph>")   # types live, not pasted
+     OR paste_text(text="<FULL content>")                     # only for non-writing uses
   5. create_folder(path="<parent folder>")   # only if it might not exist
   6. notepad_save_as(path="<full absolute path>")
   7. finish(summary="...")  # only after a "saved OK" result
@@ -286,7 +295,8 @@ def run_task(task: str) -> None:
             continue
 
         if not getattr(msg, "tool_calls", None):
-            config.log(f"[model said] {content}")
+            config.log(f"[model said]")
+            _print_typewriter(content)
             config.BRIDGE.task_done.emit(content)
             return
 

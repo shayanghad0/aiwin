@@ -37,6 +37,20 @@ def act_type_text(text: str) -> str:
         return f"error typing: {e}"
 
 
+def act_stream_text(text: str, interval: float = 0.035) -> str:
+    """Type text at human-like speed (default 35ms per char)."""
+    if not text:
+        return "error: stream_text called with empty text"
+    if not config.HAS_GUI:
+        return f"error: GUI unavailable ({config.GUI_IMPORT_ERROR})"
+    try:
+        import pyautogui
+        pyautogui.write(text, interval=float(interval))
+        return f"streamed {len(text)} chars (interval={interval}s)"
+    except Exception as e:
+        return f"error streaming text: {e}"
+
+
 def act_press_key(key: str) -> str:
     if not key:
         return "error: press_key called with empty key"

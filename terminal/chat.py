@@ -1,5 +1,7 @@
-"""Fallback chat + cost logging."""
+"""Fallback chat + cost logging + typewriter output."""
 from __future__ import annotations
+import sys
+import time
 from . import config
 
 _TASK_USAGE = {"in": 0, "out": 0}
@@ -24,6 +26,19 @@ def _log_usage(resp, model: str) -> None:
         return
     _TASK_USAGE["in"]  += getattr(u, "prompt_tokens", 0) or 0
     _TASK_USAGE["out"] += getattr(u, "completion_tokens", 0) or 0
+
+
+def _print_typewriter(text: str, interval: float = 0.02) -> None:
+    """Print text character-by-character (typewriter / streaming effect)."""
+    for ch in text:
+        sys.stdout.write(ch)
+        sys.stdout.flush()
+        if ch == '\n':
+            time.sleep(0.08)
+        else:
+            time.sleep(interval)
+    sys.stdout.write('\n')
+    sys.stdout.flush()
 
 
 def _print_task_cost() -> None:
