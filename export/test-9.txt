@@ -1,0 +1,22 @@
+What is Artificial Intelligence (AI)?
+
+Artificial Intelligence (AI) refers to the simulation of human intelligence in machines that are programmed to think and learn like humans. It encompasses a range of technologies and capabilities that allow computers to perform tasks that typically require human intelligence, such as:
+
+- Learning: The ability to acquire information and rules for using it
+- Reasoning: Solving problems and making decisions based on available information
+- Self-correction: Improving performance over time through experience
+- Problem-solving: Finding solutions to complex challenges
+- Understanding language: Recognizing and generating human speech and text
+- Perception: Interpreting visual and audio data from the world
+
+Types of AI:
+
+1. Narrow AI (Weak AI): Designed for specific tasks, like virtual assistants or recommendation systems.
+
+2. General AI (Strong AI): Hypothetical AI with human-like cognitive abilities across a wide range of tasks.
+
+3. Machine Learning: A subset of AI focused on systems that learn from data.
+
+4. Deep Learning: Uses neural networks with multiple layers to analyze various levels of data abstraction.
+
+Applications of AI include healthcare (diagnosis), finance (fraud detection), transportation (autonomous vehicles), customer service (chatbots), and many more. AI continues to evolve rapidly, transforming industries and daily life.

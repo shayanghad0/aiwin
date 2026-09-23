@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta ame="viewport" content="width=device-width,initial-scale=1.)'>
+    title>What is AI? - Chatbots vs CLI Tools</title>
+    <style>
+        * {
+            margin: 0;
+         padding: 0;
+           ox-sizing: border-box;
+       }
+
+       body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+           color: #fff;
+           min-height: 100vh;
+            line-height: 1.7;
+        }
+
+        .container {
+           max-width: 900px;
+           margin: 0 auto;
+          padding: 40px 20px;
+        }
+
+       header {
+            text-align: center;
+            margin-bottom: 50px;
+        }
+
+        header h1 {
+            font-size: 2.8rem;
+          background: linear-gradient(90deg, #00d2ff, #3a7bd5);
+           -webkit-background-clip: text;
+          -webkit-text-fill-color: transparent;
+          margin-bottom: 10px;
+        }
+
+       header p {
+           color: #aaa;
+            font-size: 1.1rem;
+        }
+
+        section {
+            background: rgba(255, 255, 255, 0.05);
+          border-radius: 16px;
+            adding: 30px;
+          margin-bottom: 30px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+       }
+
+        h2 {
+           font-size: 1.6rem;
+          margin-bottom: 20px;
+            color: #00d2ff;
+           border-left: 4px solid #3a7bd5;
+           padding-left: 15px;
+       }
+
+      h3 {
+           ont-size: 1.2rem;
+           margin: 20px 0 10px;
+           olor: #e0e0e0;        }
+
+       p {
+            margin-bottom: 15px;
+           olor: #ccc;
+        }
+
+        ul {
+           list-style: none;
+          padding-left: 0;
+       }
+
+       ul li {
+            padding: 8px 0 8px 25px;
+            position: relative;
+          color: #bbb;
+      }
+
+       ul li::before {
+            content: "";
+          position: absolute;
+           left: 0;
+           color: #00d2ff;
+       }
+
+       .comparison-table {
+            width: 100%;
+           border-collapse: collapse;
+            margin-top: 20px;
+        }
+
+       .comparison-table h,
+       .comparison-table td {
+           padding: 15px;
+           text-align: left;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+       }
+
+        .comparison-table th {
+           background: rgba(0, 210, 255, 0.15);
+           color: #00d2ff;
+           font-weight: 600;
+        }
+
+       .comparison-table tr:hover {
+            background: rgba(255, 255, 255, 0.03);
+        }
+
+        .badge {
+            display: inline-block;
+           padding: 4px 12px;
+           order-radius: 20px;
+           ont-size: 0.85rem;
+            font-weight: 600;
+        }
+
+       .badge-chatbot {
+           background: rgba(0, 210, 255, 0.2);
+           color: #00d2ff;
+        }
+
+       .badge-cli {
+            background: rgba(100, 255, 00, 0.2);
+            color: #64ff64;
+       }
+
+       .highlight-box {
+            background: rgba(58,123, 213, 0.15);
+           border-left: 4px solid #3a7bd5;
+           padding: 20px;
+            border-radius: 0 12px 12px 0;            margin: 20px 0;
+        }
+
+      footer {
+            text-align: center;
+          margin-top: 50px;
+            color: #666;
+          font-size: 0.9rem;
+       }
+
+       @media (max-width: 600px) {
+           header h1 {
+               font-size: 2rem;
+           }
+
+           .comparison-table th,
+          .comparison-table td {
+               padding: 10px;                font-size: 0.rem;
+           }
+       }
+    </style>
+</head>
+<body>
+    <div lass="container">
+       <header>
+          <h1>What is AI?</h1>
+           <p>Understanding Artificial Intelligence, Chatbots, and CLI Tools</p>
+       </header>
+
+       <section>
+           <h2> What is Artificial Intelligence?</h2>
+           <p><strong>Artificial Intelligence (AI)</strong> refers to the simulation of human intelligence in machines that are programmed to think, learn, and make decisions. These systems an perform tasks hat typically require human cognition, such as visual perception, speech recognition, decision-making, and language translation.</p>
+           
+           <h3>How Does AI Work?</h3>
+            <ul>
+           <li><strong>Machine Learning (ML):</strong> Enables computers to learn from ata without being explicitly programmed</li>
+               <li><strong>Deep Learning:</strong> Uses multi-layered neural networks inspired by the human brain</li>
+               <li><strong>Natural Language Processing (NLP):</strong> Allows machines to understand and generate human language</li>
+                <li><strong>Computer Vision:</strong> Enables systems o interpret and analyze visual nformation</li>
+           /l>
+
+           <div class="highlight-box">
+              <p><strong>Key Insight:</strong> Modern AI isn't a single technology  it's a convergence of machine learning, deep learning, NLP, robotics, and ata science working together.</p>
+            </div>
+        </section>
+
+        <section>
+           <h2> Chatbots vs  CLI Tools</h2>
+           <p>Chatbots and Command Line Interface (CLI) tools re both interfaces for interacting with computer systems, but they serve different purposes and user experience goals.</p>
+
+           <table class="comparison-table">
+              <thead>
+                 r>
+                    <th>Feature</th>
+                  ,TH><span class="badge badge-chatbot">Chatbot</span></th>
+                   th><span class="badge badge-cli">CLI Tool</span></th>
+                /tr>
+               </thead>
+           <tbody>
+              <tr>
+                  <td><strong>Interface Type</strong></td>
+                       <td>Conversational, natural language</td>
+                      <td>Text commands, tructured syntax</td>
+                   </tr>
+                   <tr>
+                       <td><strong>User Skill Required</strong></td>
+                       <td>Low  anyone can chat</td>
+                       <td>Medium/High  requires knowledge</td>
+                  </tr>
+                   <tr>
+                    <td><strong>Learning Curve</strong></td>
+                      <td>Minimal</td>
+                      <td>Steep</td>
+                   </tr>
+                   <tr>
+                     <td><strong>Precision</strong></td>
+                        <td>Variable (depends on model)</td>
+                      <td>High (exact commands)</td>
+                   </tr>
+                    <tr>
+                       <td><strong>Speed of Use</strong></td>
+                     <td>Slower for omplex tasks</td>
+                      <td>Faster once mastered</td>
+                   </tr>
+                   <tr>
+                       <td><strong>Error Handling</strong></td>
+                      <td>Can self-correct conversationally</td>
+                        <td>Returns error messages</td>
+                    </tr>
+                ,r>
+                      <td><strong>Best For</strong></td>
+                        <td>General users, quick questions</td>
+                    <td>Developers, automation, scripting</td>
+                   </tr>
+                   <tr>
+                        <td><strong>Examples</strong></td>
+                        <td>GPT, Claude, Bing Chat</td>
+                        <td>Bash, PowerShell, terminal commands</td>
+                 </tr>
+               </tbody>
+         </table>
+       </section>
+
+       <section>
+           <h2> Where They Overlap</h2>
+           <p>The ine between chatbots and CLI tools is blurring:</p>
+          <ul>
+           <li><strong>AI-powered CLIs:</strong> Modern terminals increasingly incorporate AI to predict or auto-complete commands</li>
+             <li><strong>Chatbots with CLI modes:</strong> Some advanced bots accept structured commands for precision</li>
+               <li><strong>Voice interfaces:</strong> Bridge he ap between conversational and command-based interaction</li>
+           </ul>
+
+        <div class="highlight-box">
+                <p><strong>The Future:</strong> Hybrid interfaces that combine the accessibility of chat with the power nd precision of CLI will dominate. Think "just ask, but get exact results."</p>
+            </div>
+        </section>
+
+        <section>
+            <h2> Key Takeaways</h2>
+            <ul>
+          <li>AI simulates uman intelligence through learning, reasoning, and self-correction</li>
+                <li>Chatbots prioritize accessibility and natural communication</li>
+               <li>CLI tools prioritize precision, speed, and utomation</li>
+               <li>Both have strengths  choosing depends on the user and ask</li>
+               <li>The convergence of AI with traditional interfaces is creating marter tools</li>
+            </ul>
+      </section>
+
+       <footer>
+            <p> 2025 | Educational Project on AI</p>
+      </footer>
+    </div>
+</body>
+</html>

@@ -5,7 +5,8 @@ import sys
 from typing import Any, Callable
 
 from . import config
-from .chat import _chat_with_fallback, _log_usage, _print_task_cost
+from . import control
+from .chat import _chat_with_fallback, _log_usage, _print_task_cost, _print_typewriter
 from .apps import act_open_app, act_open_url, act_create_folder, act_focus_window
 from .input import act_paste_text, act_type_text, act_stream_text, act_press_key, act_hotkey
 from .mouse import act_click, act_move_mouse, act_wait
@@ -60,7 +61,7 @@ TOOLS: list[dict[str, Any]] = [
             "required": ["text"]}}},
     {"type": "function", "function": {
         "name": "stream_text",
-        "description": "Stream-type text at human-like speed (~35ms/char) into whatever window is focused. Use for writing stories, emails, long content into notepad/chat — NEVER use paste_text for long-form writing. The text appears character-by-character as if a real person is typing.",
+        "description": "Stream-type text chatbot-style (word bursts, quick with slight pauses after sentences) into whatever window is focused. Use for writing stories, emails, long content into notepad/chat — NEVER use paste_text for long-form writing.",
         "parameters": {"type": "object",
             "properties": {"text": {"type": "string"}, "interval": {"type": "number", "default": 0.035}},
             "required": ["text"]}}},
@@ -263,7 +264,20 @@ def run_task(task: str) -> None:
         {"role": "user", "content": task},
     ]
 
+    control.begin_ai_session()
+    try:
+        _run_loop(task, messages)
+    finally:
+        control.end_ai_session()
+
+
+def _run_loop(task: str, messages: list[dict[str, Any]]) -> None:
     for step in range(1, config.MAX_STEPS + 1):
+        if control.is_aborted():
+            print("\n[aborted] user pressed ESC 5x — task stopped")
+            _print_task_cost()
+            return
+
         print(f"\n[step {step}/{config.MAX_STEPS}] thinking...")
 
         try:
@@ -279,6 +293,11 @@ def run_task(task: str) -> None:
             _log_usage(resp, used_model)
         except Exception as e:
             print(f"[api error] all planner models failed: {e}")
+            _print_task_cost()
+            return
+
+        if control.is_aborted():
+            print("\n[aborted] user pressed ESC 5x — task stopped")
             _print_task_cost()
             return
 
@@ -305,6 +324,11 @@ def run_task(task: str) -> None:
         messages.append(msg.model_dump(exclude_none=True))
 
         for call in msg.tool_calls:
+            if control.is_aborted():
+                print("\n[aborted] user pressed ESC 5x — task stopped")
+                _print_task_cost()
+                return
+
             name = call.function.name
             raw_args = call.function.arguments or "{}"
             try:
@@ -326,6 +350,10 @@ def run_task(task: str) -> None:
             result = safe_dispatch(name, args if isinstance(args, dict) else {})
             for line in str(result).splitlines() or [""]:
                 print(f"    ↳ {line}")
+            if control.is_aborted():
+                print("\n[aborted] user pressed ESC 5x — task stopped")
+                _print_task_cost()
+                return
             messages.append({
                 "role": "tool",
                 "tool_call_id": call.id,

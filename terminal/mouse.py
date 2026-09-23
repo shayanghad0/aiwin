@@ -29,7 +29,12 @@ def act_move_mouse(x: int, y: int, duration: float = 0.2) -> str:
 
 def act_wait(seconds: float) -> str:
     try:
-        time.sleep(float(seconds))
+        from . import control
+        end = time.monotonic() + float(seconds)
+        while time.monotonic() < end:
+            if control.is_aborted():
+                return "wait aborted by user"
+            time.sleep(min(0.1, end - time.monotonic()))
         return f"waited {seconds}s"
     except Exception as e:
         return f"error wait: {e}"

@@ -38,15 +38,41 @@ def act_type_text(text: str) -> str:
 
 
 def act_stream_text(text: str, interval: float = 0.035) -> str:
-    """Type text at human-like speed (default 35ms per char)."""
+    """Stream text chatbot-style: word bursts with slight pauses. Aborts on ESC x5."""
     if not text:
         return "error: stream_text called with empty text"
     if not config.HAS_GUI:
         return f"error: GUI unavailable ({config.GUI_IMPORT_ERROR})"
     try:
+        import random
+        import re
         import pyautogui
-        pyautogui.write(text, interval=float(interval))
-        return f"streamed {len(text)} chars (interval={interval}s)"
+        from . import control
+
+        base = max(float(interval), 0.005)
+        words = re.findall(r"\S+\s*", text)
+        typed = 0
+        i = 0
+        while i < len(words):
+            if control.is_aborted():
+                return f"aborted by user after {typed}/{len(text)} chars"
+            burst = random.randint(8, 16)
+            chunk = "".join(words[i:i + burst])
+            i += burst
+            pyautogui.write(chunk, interval=0)
+            typed += len(chunk)
+            if re.search(r"[.!?]\s*$", chunk):
+                delay = base * random.uniform(2, 4)
+            elif chunk.endswith((", ", "; ", ": ")):
+                delay = base * random.uniform(1, 2)
+            else:
+                delay = base * random.uniform(0.2, 0.6)
+            deadline = time.monotonic() + delay
+            while time.monotonic() < deadline:
+                if control.is_aborted():
+                    return f"aborted by user after {typed}/{len(text)} chars"
+                time.sleep(0.05)
+        return f"streamed {len(text)} chars (chat mode, interval={interval}s)"
     except Exception as e:
         return f"error streaming text: {e}"
 

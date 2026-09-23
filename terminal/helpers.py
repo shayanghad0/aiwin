@@ -12,7 +12,9 @@ def _confirm(msg: str) -> bool:
     if not config.CONFIRM:
         return True
     try:
-        return input(f"  [confirm] {msg} [y/N] ").strip().lower() in ("y", "yes")
+        from . import control
+        with control.temporary_unlock():
+            return input(f"  [confirm] {msg} [y/N] ").strip().lower() in ("y", "yes")
     except EOFError:
         return False
 
