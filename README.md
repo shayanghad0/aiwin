@@ -3,11 +3,7 @@
 A Python agent that controls your Windows desktop via mouse, keyboard, screen
 vision, and app launching. Two entry points: terminal (CLI) and GUI (PyQt5 live preview).
 
-<video width="800" height="450" controls preload="metadata" poster="thumbnail.jpg">
-  <source src="test.mp4" type="video/mp4">
-  <source src="test.webm" type="video/webm">
-  Your browser does not support the video tag.
-</video>
+[▶ Watch the demo video](https://github.com/shayanghad0/aiwin/raw/refs/heads/main/Test.mp4)
 
 The File Result
 
