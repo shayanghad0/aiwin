@@ -3,7 +3,7 @@
 A Python agent that controls your Windows desktop via mouse, keyboard, screen
 vision, and app launching. Two entry points: terminal (CLI) and GUI (PyQt5 live preview).
 
-<video controls src="Test.mp4" title="Test Result"></video>
+![Demo play](demo.gif)
 
 The File Result
 
